@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Absensi Siswa - Scan Barcode</title>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f4f7f6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      margin: 0;
+    }
+    .container {
+      background: white;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+    }
+    h2 { color: #2c3e50; margin-top: 0; }
+    .form-group {
+      text-align: left;
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #34495e;
+      margin-bottom: 4px;
+    }
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 14px;
+      background-color: #fff;
+      color: #1e293b;
+      box-sizing: border-box;
+      cursor: pointer;
+    }
+    select:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    #reader {
+      width: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 15px 0;
+    }
+    .status-box {
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 15px;
+      font-weight: bold;
+      display: none;
+      font-size: 14px;
+    }
+    .loading { background-color: #fff3cd; color: #856404; display: block; }
+    .success { background-color: #d4edda; color: #155724; display: block; }
+    .error { background-color: #f8d7da; color: #721c24; display: block; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid #ddd;
+      padding: 8px 6px;
+      text-align: left;
+    }
+    th { background-color: #f8f9fa; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>Scan Barcode Absensi</h2>
+  <p style="color: #666; font-size: 13px; margin-bottom: 16px;">Pilih kelas dan nama wali kelas terlebih dahulu, lalu scan kartu siswa</p>
+
+  <!-- Dropdown Kelas & Wali Kelas -->
+  <div class="form-row">
+    <div class="form-group">
+      <label for="kelasSelect">Kelas</label>
+      <select id="kelasSelect">
+        <option value="">-- Pilih Kelas --</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="waliKelasSelect">Nama Wali Kelas</label>
+      <select id="waliKelasSelect">
+        <option value="">-- Pilih Wali Kelas --</option>
+      </select>
+    </div>
+  </div>
+  
+  <!-- Area Kamera -->
+  <div id="reader"></div>
+  
+  <!-- Notifikasi Status -->
+  <div id="statusBox" class="status-box"></div>
+
+  <!-- Riwayat Scan Sesi Ini -->
+  <table>
+    <thead>
+      <tr>
+        <th>Waktu</th>
+        <th>NIS / ID</th>
+        <th>Kelas</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="logTable"></tbody>
+  </table>
+</div>
+
+<audio id="beepSound" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3"></audio>
+
+<script>
+  // GANTI DENGAN URL APPS SCRIPT ANDA
+  const SCRIPT_URL = "URL_WEB_APP_ANDA_DISINI";
+
+  // SESUAIKAN DAFTAR KELAS & WALI KELAS DI SINI
+  const DATA_KELAS_WALI = [
+    { kelas: "X IPA 1", waliKelas: "Budi Santoso, S.Pd" },
+    { kelas: "X IPA 2", waliKelas: "Siti Rahmawati, M.Pd" },
+    { kelas: "X IPS 1", waliKelas: "Ahmad Fauzi, S.Pd" },
+    { kelas: "XI IPA 1", waliKelas: "Dewi Lestari, S.Si" },
+    { kelas: "XI IPS 1", waliKelas: "Hendra Wijaya, S.Pd" }
+  ];
+
+  const kelasSelect = document.getElementById("kelasSelect");
+  const waliKelasSelect = document.getElementById("waliKelasSelect");
+  const statusBox = document.getElementById("statusBox");
+  const logTable = document.getElementById("logTable");
+  const beepSound = document.getElementById("beepSound");
+
+  // Isi opsi dropdown Kelas (unik) dan Wali Kelas (unik)
+  const daftarKelas = [...new Set(DATA_KELAS_WALI.map(item => item.kelas))];
+  const daftarWali = [...new Set(DATA_KELAS_WALI.map(item => item.waliKelas))];
+
+  daftarKelas.forEach(k => {
+    const opt = document.createElement("option");
+    opt.value = k;
+    opt.textContent = k;
+    kelasSelect.appendChild(opt);
+  });
+
+  daftarWali.forEach(w => {
+    const opt = document.createElement("option");
+    opt.value = w;
+    opt.textContent = w;
+    waliKelasSelect.appendChild(opt);
+  });
+
+  // Muat pilihan terakhir dari localStorage jika masih ada di daftar
+  const savedKelas = localStorage.getItem("absensi_kelas") || "";
+  const savedWali = localStorage.getItem("absensi_wali_kelas") || "";
+
+  if (daftarKelas.includes(savedKelas)) {
+    kelasSelect.value = savedKelas;
+  }
+  if (daftarWali.includes(savedWali)) {
+    waliKelasSelect.value = savedWali;
+  }
+
+  // Saat Kelas dipilih, otomatis pilih wali kelas pasangannya jika tersedia
+  kelasSelect.addEventListener("change", () => {
+    const selectedKelas = kelasSelect.value;
+    localStorage.setItem("absensi_kelas", selectedKelas);
+
+    const match = DATA_KELAS_WALI.find(item => item.kelas === selectedKelas);
+    if (match && daftarWali.includes(match.waliKelas)) {
+      waliKelasSelect.value = match.waliKelas;
+      localStorage.setItem("absensi_wali_kelas", match.waliKelas);
+    }
+  });
+
+  waliKelasSelect.addEventListener("change", () => {
+    localStorage.setItem("absensi_wali_kelas", waliKelasSelect.value);
+  });
+
+  let isProcessing = false;
+
+  function showStatus(message, type) {
+    statusBox.textContent = message;
+    statusBox.className = "status-box " + type;
+  }
+
+  function onScanSuccess(decodedText) {
+    if (isProcessing) return;
+
+    const kelas = kelasSelect.value;
+    const waliKelas = waliKelasSelect.value;
+
+    if (!kelas || !waliKelas) {
+      isProcessing = true;
+      showStatus("Pilih dulu Kelas dan Nama Wali Kelas!", "error");
+      setTimeout(() => { isProcessing = false; }, 2000);
+      return;
+    }
+
+    isProcessing = true;
+    beepSound.play().catch(() => {});
+    showStatus("Menyimpan data: " + decodedText + " (" + kelas + ")...", "loading");
+
+    fetch(SCRIPT_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        nis: decodedText,
+        kelas: kelas,
+        waliKelas: waliKelas,
+        status: "Hadir"
+      })
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.result === "success") {
+        showStatus("Berhasil absen: " + decodedText + " | " + kelas, "success");
+        
+        const row = `<tr>
+          <td>${new Date().toLocaleTimeString('id-ID')}</td>
+          <td><strong>${decodedText}</strong></td>
+          <td>${kelas}</td>
+          <td style="color: green;">Tersimpan</td>
+        </tr>`;
+        logTable.insertAdjacentHTML("afterbegin", row);
+      } else if (data.result === "duplicate") {
+        showStatus(data.message || ("NIS " + decodedText + " sudah absen hari ini!"), "loading");
+      } else {
+        showStatus("Gagal menyimpan data.", "error");
+      }
+    })
+    .catch(error => {
+      console.error("Error:", error);
+      showStatus("Terjadi kesalahan koneksi!", "error");
+    })
+    .finally(() => {
+      setTimeout(() => {
+        isProcessing = false;
+      }, 3000);
+    });
+  }
+
+  const html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader",
+    { 
+      fps: 10, 
+      qrbox: { width: 250, height: 150 },
+      rememberLastUsedCamera: true
+    },
+    false
+  );
+  html5QrcodeScanner.render(onScanSuccess);
+</script>
+
+</body>
+</html>
