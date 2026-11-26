@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Absensi Sekolah</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root{--bg:#f4f6fa;--c:#fff;--t:#1d2433;--m:#6b7588;--p:#1f6feb;--b:#dde2ec;--r:#d92d20;--g:#12805c;--o:#b7791f}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--c:#1b202b;--t:#e8ecf4;--m:#97a1b5;--b:#2c3445}}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--t)}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 16px;background:var(--c);border-bottom:1px solid var(--b)}
+header span{color:var(--m)}nav{margin-left:auto;display:flex;flex-wrap:wrap;gap:4px}
+nav a{padding:7px 12px;border-radius:8px;cursor:pointer;color:var(--m)}nav a.on{background:var(--p);color:#fff}
+main{max-width:900px;margin:16px auto;padding:0 12px}
+.card{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:16px;margin-bottom:14px}
+label{display:block;margin:10px 0 4px;color:var(--m);font-size:13px}
+input,select{width:100%;padding:9px;border:1px solid var(--b);border-radius:8px;background:var(--bg);color:var(--t)}
+button{padding:8px 12px;border:0;border-radius:8px;background:var(--p);color:#fff;cursor:pointer;margin:6px 6px 0 0}
+button.d{background:var(--r)}button.s{background:var(--g)}button.w{background:var(--o)}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:140px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--b);vertical-align:top}
+.w{overflow-x:auto}small{color:var(--m)}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:10px;color:#fff;display:none;z-index:9;max-width:92vw}
+</style></head><body>
+<div id="app"></div><div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const today=()=>(typeof db!=='undefined'&&db.today)||new Date().toLocaleDateString('sv',{timeZone:'Asia/Jakarta'});
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let db={teachers:[],students:[],att:[],loc:null};
+let me=null,myId='',role='',cred=null,tab='',f={from:today(),to:today()},loc=null,checking=false,fk='',fq='';
+
+// ---- Koneksi ke Google Sheets (Apps Script)
+const DEFAULT_API='';
+// File guru dengan URL baru mengalahkan URL lama yang tersimpan di browser
+if(DEFAULT_API&&localStorage.getItem('absensi_def')!==DEFAULT_API){localStorage.removeItem('absensi_api');localStorage.setItem('absensi_def',DEFAULT_API)}
+const getUrl=()=>localStorage.getItem('absensi_api')||DEFAULT_API;
+async function api(a,d={}){const url=getUrl();if(!url)throw Error('URL Web App belum diisi');
+ const r=await fetch(url,{method:'POST',body:JSON.stringify({a,role,u:cred.u,p:cred.p,...d})});
+ const j=await r.json();if(!j.ok)throw Error(j.err||'Gagal');return j}
+let seq=0,applied=0,lastSync='';
+async function sync(){const n=++seq,c=cred,res=(await api('load')).db;
+ if(c!==cred||n<applied)return false; // abaikan balasan lama / setelah keluar
+ applied=n;const old=today(),sig=JSON.stringify(db);db=res;
+ if(f.from===old&&f.to===old)f={from:today(),to:today()};
+ if(role==='guru')me=db.teachers.find(t=>t.id===myId)||me;
+ lastSync=new Date().toLocaleTimeString('id-ID');const e=$('#ls');if(e)e.textContent='Sinkron '+lastSync;
+ return sig!==JSON.stringify(db)}
+// ---- Sinkron otomatis (tiap 20 detik dan saat aplikasi dibuka kembali)
+const sedangMengisi=()=>/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)||[...document.querySelectorAll('#app input')].some(i=>i.value!==i.defaultValue);
+let autoBusy=false,pending=false;
+async function autoSync(){if(!me||!cred||autoBusy||document.hidden)return;autoBusy=true;
+ try{if(await sync())pending=true;if(pending&&me&&!sedangMengisi()){pending=false;render()}}
+ catch(e){const el=$('#ls');if(el)el.textContent='⚠ Gagal sinkron'+(lastSync?' (terakhir '+lastSync+')':'')}
+ autoBusy=false}
+setInterval(autoSync,20000);
+document.addEventListener('visibilitychange',autoSync);
+window.addEventListener('online',autoSync);
+async function act(a,d,ok){try{msg('Memproses...');await api(a,d);await sync();render();msg(ok)}catch(e){msg(e.message,1)}}
+async function refresh(){try{msg('Memuat ulang...');await sync();loc=null;render();msg('Data diperbarui')}catch(e){msg(e.message,1)}}
+function msg(t,bad){const e=$('#toast');e.textContent=t;e.style.background=bad?'var(--r)':'var(--g)';e.style.display='block';clearTimeout(e.h);e.h=setTimeout(()=>e.style.display='none',4000)}
+
+// ---- Lokasi
+function gps(){return new Promise((res,rej)=>{if(!navigator.geolocation)return rej(Error('Lokasi tidak terbaca: perangkat tidak mendukung lokasi'));
+ navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude,lng:p.coords.longitude,acc:Math.round(p.coords.accuracy)}),
+ e=>rej(Error(e.code===1?'Lokasi tidak terbaca: izin lokasi ditolak. Aktifkan izin lokasi di browser':'Lokasi tidak terbaca: aktifkan GPS lalu coba lagi')),{enableHighAccuracy:true,timeout:12000,maximumAge:5000})})}
+const jarak=(a,b,c,e)=>{const r=x=>x*Math.PI/180,h=Math.sin(r(c-a)/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(r(e-b)/2)**2;return 12742000*Math.asin(Math.sqrt(h))};
+async function cekLok(){if(checking)return;checking=true;
+ try{const p=await gps(),d=jarak(p.lat,p.lng,db.loc.lat,db.loc.lng);
+  loc=d<=db.loc.radius?{ok:true,t:Date.now()}:{ok:false,t:Date.now(),msg:'Lokasi tidak sesuai: Anda sekitar '+Math.round(d)+' m dari lokasi sekolah (maks '+db.loc.radius+' m)'}}
+ catch(e){loc={ok:false,t:Date.now(),msg:e.message}}
+ checking=false;render()}
+function gate(){if(role!=='guru'||!db.loc)return'';
+ if(!loc||Date.now()-loc.t>3e5){if(!checking)setTimeout(cekLok,0);return `<div class=card>📍 Memeriksa lokasi...</div>`}
+ return loc.ok?'':`<div class=card><b style="color:var(--r)">⛔ ${esc(loc.msg)}</b><br><small>Menu hanya bisa dibuka di dalam radius ${db.loc.radius} m dari lokasi sekolah.</small><br><button onclick="loc=null;render()">Cek lokasi lagi</button></div>`}
+async function pakaiLokasi(){try{msg('Mengambil lokasi...');const p=await gps();$('#lat').value=p.lat.toFixed(6);$('#lng').value=p.lng.toFixed(6);msg('Lokasi terbaca (akurasi ±'+p.acc+' m). Tekan Simpan lokasi')}catch(e){msg(e.message,1)}}
+function saveLoc(){const lat=parseFloat($('#lat').value),lng=parseFloat($('#lng').value),radius=parseInt($('#rad').value);if(isNaN(lat)||isNaN(lng)||!(radius>0)||Math.abs(lat)>90||Math.abs(lng)>180)return msg('Isi latitude, longitude, dan radius dengan benar',1);act('setLoc',{lat,lng,radius},'Lokasi absensi disimpan')}
+function clearLoc(){if(confirm('Nonaktifkan pembatasan lokasi?'))act('clearLoc',{},'Pembatasan lokasi dinonaktifkan')}
+
+// ---- Absensi (Hadir / Alfa / Izin + keterangan)
+const rec=(type,id)=>db.att.find(a=>a.type===type&&a.id===id&&a.date===today());
+async function absen(type,id,status){let ket='';
+ if(status==='Izin'){ket=(prompt('Keterangan izin:')||'').trim();if(!ket)return msg('Keterangan izin wajib diisi',1)}
+ try{msg('Memproses...');const pos=db.loc?await gps():{};await api('absen',{type,id,status,ket,...pos});await sync();render();msg('Tersimpan: '+status)}
+ catch(e){msg(e.message,1);if(/^Lokasi tidak sesuai/.test(e.message)){loc={ok:false,t:Date.now(),msg:e.message};render()}}}
+const muridList=()=>db.students.filter(s=>(!fk||s.kelas===fk)&&(!fq||(s.name+' '+(s.nik||'')).toLowerCase().includes(fq.toLowerCase())));
+async function hadirSemua(){const ids=muridList().filter(s=>!rec('murid',s.id)).map(s=>s.id);if(!ids.length)return msg('Semua murid pada daftar ini sudah terisi',1);
+ if(!confirm('Tandai '+ids.length+' murid yang belum terisi sebagai HADIR?'))return;
+ try{msg('Memproses...');const pos=db.loc?await gps():{};await api('absenBulk',{ids,status:'Hadir',...pos});await sync();render();msg(ids.length+' murid ditandai hadir')}
+ catch(e){msg(e.message,1);if(/^Lokasi tidak sesuai/.test(e.message)){loc={ok:false,t:Date.now(),msg:e.message};render()}}}
+const COL={Hadir:'var(--g)',Alfa:'var(--r)',Izin:'var(--o)'};
+const badge=r=>r?`<b style="color:${COL[r.status||'Hadir']}">${r.status||'Hadir'}</b>${r.ket?`<br><small>${esc(r.ket)}</small>`:''}`:'<small>belum diisi</small>';
+const btns=(type,id)=>['Hadir','Alfa','Izin'].map(s=>`<button class="${s==='Hadir'?'s':s==='Alfa'?'d':'w'}" onclick="absen('${type}','${id}','${s}')">${s}</button>`).join('');
+const locNote=()=>db.loc?`<br>📍 Absen hanya bisa dalam radius ${db.loc.radius} m dari lokasi sekolah.`:'';
+
+// ---- Data
+function addGuru(){const name=$('#n').value.trim(),nik=$('#nk').value.trim(),user=$('#u').value.trim(),pass=$('#p').value;if(!name||!nik||!user||!pass)return msg('Lengkapi semua kolom',1);act('addGuru',{name,nik,user,pass},'Guru ditambahkan')}
+function addMurid(){const name=$('#n').value.trim(),nik=$('#nk').value.trim(),kelas=$('#k').value.trim();if(!name||!nik||!kelas)return msg('Isi nama, NIK/NIS & kelas',1);act('addMurid',{name,nik,kelas},'Murid ditambahkan')}
+function del(a,id){if(confirm('Hapus data ini?'))act(a,{id},'Data dihapus')}
+function gantiSandi(id){const t=db.teachers.find(x=>x.id===id);if(!t)return;const p=prompt('Sandi baru untuk '+t.name+' (minimal 4 karakter):');if(p===null)return;if(p.length<4)return msg('Sandi minimal 4 karakter',1);act('setPass',{id,pass:p},'Sandi '+t.name+' diganti')}
+function ubahNik(kind,id){const o=(kind==='guru'?db.teachers:db.students).find(x=>x.id===id);if(!o)return;const v=prompt('NIK/NIP untuk '+o.name+':',o.nik||'');if(v===null)return;if(!v.trim())return msg('NIK/NIP tidak boleh kosong',1);act('setNik',{kind,id,nik:v.trim()},'NIK/NIP diperbarui')}
+async function login(){if($('#url')&&$('#url').value.trim())localStorage.setItem('absensi_api',$('#url').value.trim());role=$('#r').value;cred={u:$('#u').value.trim(),p:$('#p').value};
+ try{msg('Masuk...');const j=await api('login');myId=j.id||'';await sync();if(role==='admin')me={name:j.name};tab='';loc=null;render();msg('Selamat datang, '+j.name)}
+ catch(e){role='';cred=null;msg(e.message,1)}}
+function logout(){me=null;role='';cred=null;loc=null;db={teachers:[],students:[],att:[],loc:null};render()}
+function saveUrl(){const u=$('#url').value.trim();if(!/^https:\/\/script\.google(usercontent)?\.com\//.test(u))return msg('URL tidak valid',1);localStorage.setItem('absensi_api',u);msg('URL disimpan')}
+function dlGuru(){const u=getUrl();if(!u)return msg('Isi dan simpan URL dulu',1);const c=document.documentElement.cloneNode(true);c.querySelector('#app').innerHTML='';c.querySelector('#toast').style.display='none';
+ const h=('<!DOCTYPE html>\n'+c.outerHTML).replace(/const DEFAULT_API='[^']*';/,"const DEFAULT_API='"+u.replace(/'/g,'')+"';");
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([h],{type:'text/html'}));a.download='absensi-guru.html';a.click()}
+
+// ---- Ekspor
+function dataOf(w){const rg=t=>db.att.filter(a=>a.type===t&&a.date>=f.from&&a.date<=f.to).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
+ if(w==='guru')return['Daftar Guru',['No','Nama','NIK/NIP','Username'],db.teachers.map((t,i)=>[i+1,t.name,t.nik||'-',t.user])];
+ if(w==='murid')return['Daftar Murid',['No','Nama','NIK','Kelas'],db.students.map((s,i)=>[i+1,s.name,s.nik||'-',s.kelas])];
+ const t=w==='rg'?'guru':'murid';return['Absensi '+(t==='guru'?'Guru':'Murid')+' '+f.from+' sd '+f.to,['Tanggal','Jam','NIK/NIP','Nama','Kelas','Status','Keterangan'],rg(t).map(a=>[a.date,a.time,a.nik||'-',a.name,a.kelas,a.status||'Hadir',a.ket||''])]}
+function ex(k,w){if(typeof XLSX==='undefined'||!window.jspdf)return msg('Library ekspor belum termuat (perlu internet)',1);
+ const[n,h,r]=dataOf(w);if(k==='x'){const b=XLSX.utils.book_new();XLSX.utils.book_append_sheet(b,XLSX.utils.aoa_to_sheet([h,...r]),'Data');XLSX.writeFile(b,n+'.xlsx')}
+ else{const d=new jspdf.jsPDF();d.text(n,14,15);d.autoTable({head:[h],body:r,startY:22});d.save(n+'.pdf')}}
+const exBtn=w=>`<button class=s onclick="ex('x','${w}')">Unduh Excel</button><button class=s onclick="ex('p','${w}')">Unduh PDF</button>`;
+const tbl=(h,r)=>`<div class=w><table><tr>${h.map(x=>`<th>${x}</th>`).join('')}</tr>${r.map(x=>`<tr>${x.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')||`<tr><td colspan=${h.length}><small>Belum ada data</small></td></tr>`}</table></div>`;
+
+function view(){
+ const g=gate();if(g)return g;
+ if(tab==='set')return `<div class=card><b>Lokasi Absensi</b><br><small>Menu absensi guru hanya bisa dibuka di dalam radius dari titik ini. ${db.loc?`Saat ini: ${db.loc.lat}, ${db.loc.lng} (radius ${db.loc.radius} m).`:'Belum diatur: absen tidak dibatasi lokasi.'} Tekan tombol lokasi saat kepala sekolah berada di sekolah.</small>
+ <div class=row><div><label>Latitude</label><input id=lat value="${db.loc?db.loc.lat:''}"></div><div><label>Longitude</label><input id=lng value="${db.loc?db.loc.lng:''}"></div><div><label>Radius (meter)</label><input id=rad type=number value="${db.loc?db.loc.radius:100}"></div></div>
+ <button class=s onclick=pakaiLokasi()>📍 Pakai lokasi saya sekarang</button><button onclick=saveLoc()>Simpan lokasi</button><button class=d onclick=clearLoc()>Nonaktifkan</button></div>
+ <div class=card><b>Pengaturan Koneksi Database</b><br><small>URL Web App Google Apps Script (berakhiran /exec).</small><label>URL Web App</label><input id=url value="${esc(getUrl())}" placeholder="https://script.google.com/macros/s/.../exec"><button onclick=saveUrl()>Simpan URL</button></div>
+ <div class=card><b>File untuk Guru</b><br><small>Unduh salinan aplikasi dengan URL sudah tertanam, lalu bagikan ke guru.</small><br><button class=s onclick=dlGuru()>Unduh absensi-guru.html</button></div>`;
+ if(tab==='guru')return `<div class=card><b>Tambah Guru</b><div class=row><div><label>Nama</label><input id=n></div><div><label>NIK/NIP</label><input id=nk></div><div><label>Username</label><input id=u></div><div><label>Password</label><input id=p></div></div><button onclick=addGuru()>Tambah</button></div>
+ <div class=card><b>Daftar Guru (${db.teachers.length})</b> ${exBtn('guru')}${tbl(['Nama','NIK/NIP','Username',''],db.teachers.map(t=>[esc(t.name),esc(t.nik||'-'),esc(t.user),`<button onclick="ubahNik('guru','${t.id}')">Ubah NIP</button><button class=s onclick="gantiSandi('${t.id}')">Ganti sandi</button><button class=d onclick="del('delGuru','${t.id}')">Hapus</button>`]))}</div>`;
+ if(tab==='murid')return `<div class=card><b>Daftar Murid (${db.students.length})</b> ${exBtn('murid')}${tbl(['Nama','NIK','Kelas',''],db.students.map(s=>[esc(s.name),esc(s.nik||'-'),esc(s.kelas),`<button onclick="ubahNik('murid','${s.id}')">Ubah NIK</button><button class=d onclick="del('delMurid','${s.id}')">Hapus</button>`]))}</div>`;
+ if(tab==='rg'||tab==='rm'){const[n,h,r]=dataOf(tab);return `<div class=card><div class=row><div><label>Dari</label><input type=date value=${f.from} onchange="f.from=this.value;render()"></div><div><label>Sampai</label><input type=date value=${f.to} onchange="f.to=this.value;render()"></div></div>${exBtn(tab)}</div><div class=card><b>${esc(n)}</b> (${r.length})${tbl(h,r.map(x=>x.map(esc)))}</div>`}
+ if(tab==='ag')return `<div class=card><b>Absen Guru</b> <small>${today()}${locNote()}</small>${tbl(['Nama','NIK/NIP','Status','Aksi'],[[esc(me.name),esc(me.nik||'-'),badge(rec('guru',me.id)),btns('guru',me.id)]])}</div>`;
+ if(tab==='am'){const L=muridList(),c={Hadir:0,Alfa:0,Izin:0,Belum:0};L.forEach(s=>{const r=rec('murid',s.id);c[r?(r.status||'Hadir'):'Belum']++});
+  const ks=[...new Set(db.students.map(s=>s.kelas))].sort();
+  return `<div class=card><b>Absen Murid</b> <small>${today()}${locNote()}</small>
+  <div class=row><div><label>Kelas</label><select onchange="fk=this.value;render()"><option value="">Semua kelas</option>${ks.map(k=>`<option ${k===fk?'selected':''}>${esc(k)}</option>`).join('')}</select></div><div><label>Cari nama / NIK</label><input value="${esc(fq)}" onchange="fq=this.value;render()"></div></div>
+  <p><b style="color:var(--g)">Hadir ${c.Hadir}</b> · <b style="color:var(--o)">Izin ${c.Izin}</b> · <b style="color:var(--r)">Alfa ${c.Alfa}</b> · Belum ${c.Belum}</p>
+  <button class=s onclick=hadirSemua()>✔ Hadirkan semua yang belum terisi</button>
+  ${tbl(['Nama','NIK','Kelas','Status','Aksi'],L.map(s=>[esc(s.name),esc(s.nik||'-'),esc(s.kelas),badge(rec('murid',s.id)),btns('murid',s.id)]))}</div>`}
+ if(tab==='dm')return `<div class=card><b>Tambah Murid</b><div class=row><div><label>Nama</label><input id=n></div><div><label>NIK/NIS</label><input id=nk></div><div><label>Kelas</label><input id=k></div></div><button onclick=addMurid()>Tambah</button></div>
+ <div class=card><b>Murid (${db.students.length})</b>${tbl(['Nama','NIK','Kelas',''],db.students.map(s=>[esc(s.name),esc(s.nik||'-'),esc(s.kelas),`<button onclick="ubahNik('murid','${s.id}')">Ubah NIK</button><button class=d onclick="del('delMurid','${s.id}')">Hapus</button>`]))}</div>`}
+
+function render(){const A=$('#app');
+ if(!me){A.innerHTML=`<div class=card style="max-width:360px;margin:8vh auto"><h2 style="margin-top:0">Absensi Sekolah</h2>${getUrl()?'':'<label>URL Web App (isi sekali, minta ke kepala sekolah)</label><input id=url placeholder="https://script.google.com/macros/s/.../exec">'}<label>Masuk sebagai</label><select id=r><option value=admin>Kepala Sekolah / Admin</option><option value=guru>Guru</option></select><label>Username</label><input id=u><label>Password</label><input id=p type=password onkeydown="event.key==='Enter'&&login()"><button onclick=login()>Masuk</button>${localStorage.getItem('absensi_api')?'<p><small><a style="cursor:pointer;text-decoration:underline" onclick="localStorage.removeItem(\'absensi_api\');render()">Ubah URL koneksi</a></small></p>':''}</div>`;return}
+ const T=role==='admin'?[['guru','Daftar Guru'],['murid','Daftar Murid'],['rg','Absensi Guru'],['rm','Absensi Murid'],['set','Pengaturan']]:[['ag','Absen Guru'],['am','Absen Murid'],['dm','Data Murid']];
+ if(!T.some(t=>t[0]===tab))tab=T[0][0];
+ A.innerHTML=`<header><b>${esc(me.name)}</b><span>${role==='admin'?'Kepala Sekolah':'Guru'}</span><span id=ls>${lastSync?'Sinkron '+lastSync:''}</span><nav>${T.map(t=>`<a class="${t[0]===tab?'on':''}" onclick="tab='${t[0]}';render()">${t[1]}</a>`).join('')}<a onclick="refresh()">⟳ Muat ulang</a><a onclick="logout()">Keluar</a></nav></header><main>${db.ver===3?'':'<div class=card><b style="color:var(--r)">⚠ Apps Script masih versi lama.</b><br><small>Tempel Code.gs terbaru, lalu Deploy → Kelola deployment → Edit → Versi baru.</small></div>'}${view()}</main>`}
+render();
+</script></body></html>
